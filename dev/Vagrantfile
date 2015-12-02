@@ -1,0 +1,214 @@
+	# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+
+
+boxes = [
+    {
+        :name => "proxy1",
+        :eth1 => "192.168.236.60",
+        :eth2 => "192.168.252.60",
+        :mem => "2048",
+        :cpu => "1",
+        :nodetype => "swift_proxy"
+    },
+=begin
+	{
+        :name => "object1",
+        :eth1 => "192.168.236.70",
+        :eth2 => "192.168.252.70",
+        :mem => "2048",
+        :cpu => "1",
+        :nodetype => "swift_object"
+    },
+
+    {
+        :name => "object2",
+        :eth1 => "192.168.236.71",
+        :eth2 => "192.168.252.71",
+        :mem => "2048",
+        :cpu => "1",
+        :nodetype => "swift_object"
+    },
+    {
+        :name => "object3",
+        :eth1 => "192.168.236.72",
+        :eth2 => "192.168.252.72",
+        :mem => "2048",
+        :cpu => "1",
+        :nodetype => "swift_object"
+    },   
+	{
+        :name => "core1",
+        :eth1 => "192.168.236.80",
+        :eth2 => "192.168.252.80",
+        :mem => "2048",
+        :cpu => "1",
+        :nodetype => "core"
+    },
+=end    
+    	{
+        :name => "core2",
+        :eth1 => "192.168.236.81",
+        :eth2 => "192.168.252.81",
+        :mem => "2048",
+        :cpu => "1",
+        :nodetype => "core"
+    }
+]
+
+
+
+$commonscript = <<COMMONSCRIPT
+
+
+cat << EOF >> /etc/hosts
+192.168.236.60 salt
+EOF
+
+
+
+add-apt-repository ppa:saltstack/salt --yes
+apt-get update
+apt-get install salt-minion --yes
+echo "roles:" >> /etc/salt/grains
+ 
+
+COMMONSCRIPT
+
+
+$swiftscript = <<SWIFTSCRIPT
+
+mkdir -p /srv/pillar/
+echo "mine_functions:" > /srv/pillar/swift.sls
+echo "  network.ip_addrs: [eth1]"  >> /srv/pillar/swift.sls
+
+echo "base:" > /srv/pillar/top.sls
+echo "  '*':" >> /srv/pillar/top.sls
+echo "    - swift" >> /srv/pillar/top.sls
+
+
+
+
+
+SWIFTSCRIPT
+
+
+$proxyscript = <<PROXYSCRIPT
+
+mkdir -p /etc/pki/tls/certs/
+apt-get install salt-master salt-api git --yes
+
+
+
+echo "fileserver_backend:" >> /etc/salt/master
+echo "  - roots" >> /etc/salt/master
+echo "  - minion" >> /etc/salt/master
+echo "  - git" >> /etc/salt/master
+echo "" >> /etc/salt/master
+echo "file_recv: True" >> /etc/salt/master
+
+
+echo "auto_accept: True" >> /etc/salt/master
+echo "external_auth:" >> /etc/salt/master
+echo "  pam:" >> /etc/salt/master
+echo "    api:" >> /etc/salt/master
+echo "      - .*" >> /etc/salt/master
+      
+echo "rest_cherrypy:" >> /etc/salt/master
+echo "  port: 8000" >> /etc/salt/master
+echo "  debug: True" >> /etc/salt/master
+echo "  ssl_crt: /etc/pki/tls/certs/localhost.crt" >> /etc/salt/master
+echo "  ssl_key: /etc/pki/tls/certs/localhost.key" >> /etc/salt/master
+
+
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/pki/tls/certs/localhost.key -out /etc/pki/tls/certs/localhost.crt -subj "/C=FR/ST=PACA/L=Bordeaux/O=Dis/CN=t-nova.eu"
+
+
+
+echo "  swift_proxy" >> /etc/salt/grains
+
+service salt-minion restart
+service salt-master restart
+service salt-api restart
+
+#add user for api
+echo "api:api::api:::" |newusers
+
+PROXYSCRIPT
+
+$objectscript = <<OBJECTSCRIPT
+
+echo "log_level: debug" >> /etc/salt/minion
+echo "  swift_object" >> /etc/salt/grains
+
+service salt-minion restart
+OBJECTSCRIPT
+
+
+$corescript= <<CORESCRIPT
+echo "log_level: debug" >> /etc/salt/minion
+
+echo "  - core" >> /etc/salt/grains
+echo "  - broker" >> /etc/salt/grains
+echo "  - worker" >> /etc/salt/grains
+echo "  - frontend" >> /etc/salt/grains
+echo "  - swift_object" >> /etc/salt/grains
+
+service salt-minion restart
+
+CORESCRIPT
+
+Vagrant.configure(2) do |config|
+
+  config.vm.box = "ubuntu/trusty64"
+  
+
+  # Turn off shared folders
+  config.vm.synced_folder ".", "/vagrant", id: "vagrant-root", disabled: true
+
+  boxes.each do |opts|
+    config.vm.define opts[:name] do |config|
+      config.vm.hostname = opts[:name]
+
+      config.vm.provision :shell, inline: $commonscript
+
+      config.vm.network :private_network, ip: opts[:eth1]
+      config.vm.network :private_network, ip: opts[:eth2]
+
+      config.vm.provider "vmware_fusion" do |v|
+        v.vmx["memsize"] = opts[:mem]
+        v.vmx["numvcpus"] = opts[:cpu]
+      end
+
+      config.vm.provider "virtualbox" do |v|
+        v.customize ["modifyvm", :id, "--memory", opts[:mem]]
+        v.customize ["modifyvm", :id, "--cpus", opts[:cpu]]
+      end
+
+      if opts[:nodetype] == "swift_proxy"
+          config.vm.provision :shell, inline: $proxyscript
+          config.vm.provision :shell, inline: $swiftscript
+          config.vm.synced_folder "tnovasalt/", "/srv/salt"
+          
+      end
+
+      if opts[:nodetype] == "swift_object"
+          config.vm.provision :shell, inline: $objectscript
+          config.vm.provision :shell, inline: $swiftscript
+      end
+      
+      if opts[:nodetype] == "core"
+          config.vm.provision :shell, inline: $corescript
+          
+
+      end
+      
+      
+    end
+  end
+end
